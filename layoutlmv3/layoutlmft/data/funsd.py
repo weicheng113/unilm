@@ -134,3 +134,8 @@ class Funsd(datasets.GeneratorBasedBuilder):
                 bboxes.extend(cur_line_bboxes)
             yield guid, {"id": str(guid), "tokens": tokens, "bboxes": bboxes, "ner_tags": ner_tags,
                          "image": image, "image_path": image_path}
+
+
+if __name__ == "__main__":
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # disable GPU
+    print("test")

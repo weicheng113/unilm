@@ -30,7 +30,7 @@ import utils
 import modeling_pretrain
 
 
-def get_args():
+def get_args(args):
     parser = argparse.ArgumentParser('BEiT pre-training script', add_help=False)
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--epochs', default=300, type=int)
@@ -129,7 +129,7 @@ def get_args():
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
 
-    return parser.parse_args()
+    return parser.parse_args(args=args)
 
 
 def get_model(args):
@@ -273,8 +273,36 @@ def main(args):
     print('Training time {}'.format(total_time_str))
 
 
-if __name__ == '__main__':
-    opts = get_args()
+def local_main():
+    args = []
+    args.extend([
+        "--data_path", "./imagenette2",
+        "--output_dir", "./output",
+        "--num_mask_patches", "75",
+        "--model", "beit_base_patch16_224_8k_vocab",
+        "--discrete_vae_weight_path", "./dall_e_tokenizer_weight",
+        "--batch_size", "128",
+        "--lr", "1.5e-3",
+        "--warmup_epochs", "10",
+        "--epochs", "800",
+        "--clip_grad", "3.0",
+        "--drop_path", "0.1",
+        "--layer_scale_init_value", "0.1",
+        "--device", "cpu",
+        "--imagenet_default_mean_and_std"
+    ])
+
+    opts = get_args(args)
     if opts.output_dir:
         Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
     main(opts)
+
+
+if __name__ == '__main__':
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # disable GPU
+
+    # opts = get_args()
+    # if opts.output_dir:
+    #     Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
+    # main(opts)
+    local_main()

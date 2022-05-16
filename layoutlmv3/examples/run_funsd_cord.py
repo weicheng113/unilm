@@ -151,7 +151,7 @@ class DataTrainingArguments:
     imagenet_default_mean_and_std: bool = field(default=False, metadata={"help": ""})
 
 
-def main():
+def main(args):
     # See all possible arguments in layoutlmft/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
@@ -162,7 +162,7 @@ def main():
         # let's parse it to get our arguments.
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, training_args = parser.parse_args_into_dataclasses(args=args)
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -519,5 +519,28 @@ def _mp_fn(index):
     main()
 
 
+# if __name__ == "__main__":
+#     main()
+
+def local_main():
+    args = []
+    args.extend([
+        "--model_name_or_path", "microsoft/layoutlmv3-base",
+        "--dataset_name", "funsd",
+        "--output_dir", "./output",
+        "--do_train",
+        "--do_eval",
+        "--segment_level_layout", "1",
+        "--visual_embed", "1",
+        "--input_size", "224",
+        "--max_steps", "1000",
+        "--save_steps", "-1",
+        "--evaluation_strategy", "steps",
+        "--eval_steps", "100",
+    ])
+    main(args)
+
+
 if __name__ == "__main__":
-    main()
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # disable GPU
+    local_main()

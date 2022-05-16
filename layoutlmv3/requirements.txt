@@ -4,9 +4,17 @@ seqeval==1.2.2
 deepspeed==0.5.7
 tensorboard==2.7.0
 seqeval==1.2.2
-sentencepiece
+sentencepiece==0.1.96
 timm==0.4.12
-Pillow
-einops
-textdistance
-shapely
+Pillow==9.1.0
+einops==0.4.1
+textdistance==4.2.2
+jupyterlab==3.3.3
+ipywidgets==7.7.0
+#shapely
+
+--find-links https://download.pytorch.org/whl/cu113/torch_stable.html
+torch==1.10.1
+torchvision==0.11.2
+--find-links https://dl.fbaipublicfiles.com/detectron2/wheels/cu111/torch1.10/index.html
+detectron2==0.6

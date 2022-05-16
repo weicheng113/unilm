@@ -282,3 +282,9 @@ def pil_loader(path: str) -> Image.Image:
     with open(path, 'rb') as f:
         img = Image.open(f)
         return img.convert('RGB')
+
+
+if __name__ == "__main__":
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # disable GPU
+    print("test")
