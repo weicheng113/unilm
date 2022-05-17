@@ -48,10 +48,10 @@ class LayoutLMv2Embeddings(nn.Module):
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
 
         self.x_position_embeddings = nn.Embedding(config.max_2d_position_embeddings, config.coordinate_size)
-        self.y_position_embeddings = nn.Embedding(config.max_2d_position_embeddings, config.coordinate_size)
-        self.h_position_embeddings = nn.Embedding(config.max_2d_position_embeddings, config.shape_size)
-        self.w_position_embeddings = nn.Embedding(config.max_2d_position_embeddings, config.shape_size)
-        self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
+        self.y_position_embeddings = nn.Embedding(config.max_2d_position_embeddings, config.coordinate_size)  # 1024(we used 1000 at the moment) * 128
+        self.h_position_embeddings = nn.Embedding(config.max_2d_position_embeddings, config.shape_size)  # 1024(we used 1000 at the moment) * 128
+        self.w_position_embeddings = nn.Embedding(config.max_2d_position_embeddings, config.shape_size)  # 1024(we used 1000 at the moment) * 128
+        self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)  # 2(two token types) * 768
 
         self.LayerNorm = LayoutLMv2LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -60,16 +60,16 @@ class LayoutLMv2Embeddings(nn.Module):
 
     def _cal_spatial_position_embeddings(self, bbox):
         try:
-            left_position_embeddings = self.x_position_embeddings(bbox[:, :, 0])
+            left_position_embeddings = self.x_position_embeddings(bbox[:, :, 0])  # get embedding for top left x. (batch_size, 512) -> (batch_size, 512, 128). each value is represented by a 128 vector.
             upper_position_embeddings = self.y_position_embeddings(bbox[:, :, 1])
             right_position_embeddings = self.x_position_embeddings(bbox[:, :, 2])
             lower_position_embeddings = self.y_position_embeddings(bbox[:, :, 3])
         except IndexError as e:
             raise IndexError("The :obj:`bbox`coordinate values should be within 0-1000 range.") from e
-
-        h_position_embeddings = self.h_position_embeddings(bbox[:, :, 3] - bbox[:, :, 1])
-        w_position_embeddings = self.w_position_embeddings(bbox[:, :, 2] - bbox[:, :, 0])
-
+        # x_position_embeddings(1024, 128), y_position_embeddings(1024, 128), h_position_embeddings(1024, 128), w_position_embeddings(1024, 128)
+        h_position_embeddings = self.h_position_embeddings(bbox[:, :, 3] - bbox[:, :, 1])  # height embedding (batch_size, 512) -> (batch_size, 512, 128)
+        w_position_embeddings = self.w_position_embeddings(bbox[:, :, 2] - bbox[:, :, 0])  # width embedding
+        # concat to spatial_position_embeddings(batch_size, 512, 768(128 * 6))
         spatial_position_embeddings = torch.cat(
             [
                 left_position_embeddings,
@@ -111,14 +111,18 @@ class LayoutLMv2SelfAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
-    def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)
+    def transpose_for_scores(self, x):  # x(batch, 561, 768), 561 consists of 512 text tokens and 49 visually cut bboxes. 768 is combined embeddings.
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)  # new_x_shape(batch, 561, num_attention_heads=12, attention_head_size=64)
+        x = x.view(*new_x_shape)  # x(8, 561, num_attention_heads=12, attention_head_size=64)
+        return x.permute(0, 2, 1, 3)  # x(8, num_attention_heads=12, 561, attention_head_size=64)
 
     def compute_qkv(self, hidden_states):
+        # hidden_states - final_emb(batch, 561=49+512, 768) combines text_layout_emb and visual_emb.
         if self.fast_qkv:
+            # qkv(batch, 561, 768*3) = hidden_states(batch, 561, 768) * W^T(768, 768*3).
+            # We project text_layout_visual_embedding into the row spaces of query, key and value.
             qkv = self.qkv_linear(hidden_states)
+            # We cut qkv(batch, 561, 768*3) along last dim into 3 same-sized(batch, 561, 768) projected matrices: query, key, value.
             q, k, v = torch.chunk(qkv, 3, dim=-1)
             if q.ndimension() == self.q_bias.ndimension():
                 q = q + self.q_bias
@@ -131,6 +135,7 @@ class LayoutLMv2SelfAttention(nn.Module):
             q = self.query(hidden_states)
             k = self.key(hidden_states)
             v = self.value(hidden_states)
+        # q - query(batch, 561, 768), k - key(batch, 561, 768), v - value(batch, 561, 768)
         return q, k, v
 
     def forward(
@@ -145,29 +150,43 @@ class LayoutLMv2SelfAttention(nn.Module):
         rel_pos=None,
         rel_2d_pos=None,
     ):
+        # hidden_states - final_emb(batch, 561=512+49, 768) combines text_layout_emb and visual_emb. 561 consists of 512 text tokens and 49 visually cut bboxes. 768 is combined embeddings.
+        # attention_mask - extended_attention_mask(8, 1, 1, 561) contains 0 for attended word token and 49 visually cutted bboxes, -10000 for padding and others.
+        # rel_pos(batch, num_attention_heads=12, 561, 561) relative position information, or neighbour information, is calculated for input positions and visual bboxes positions.
+        # rel_2d_pos(batch, num_attention_heads=12, 561, 561) relative 2d position information, or neighbour information, is calculated for input bboxes and visually cut 49 bboxes.
+
+        # projected query, key and value matrices.
+        # q - query(batch, 561, 768), k - key(batch, 561, 768), v - value(batch, 561, 768)
+        # each of query, key and value matrices is a concatenation of 12 head projection matrices.
         q, k, v = self.compute_qkv(hidden_states)
 
         # (B, L, H*D) -> (B, H, L, D)
-        query_layer = self.transpose_for_scores(q)
-        key_layer = self.transpose_for_scores(k)
-        value_layer = self.transpose_for_scores(v)
+        query_layer = self.transpose_for_scores(q)  # query_layer(batch, num_attention_heads=12, 561, attention_head_size=64)
+        key_layer = self.transpose_for_scores(k)  # key_layer(batch, num_attention_heads=12, 561, attention_head_size=64)
+        value_layer = self.transpose_for_scores(v)  # value_layer(batch, num_attention_heads=12, 561, attention_head_size=64)
 
+        # this is a practice from transformer. Dividing the square root of the dimension of the key vectors used in the paper – 64.
+        # This leads to having more stable gradients. There could be other possible values here, but this is the default.
         query_layer = query_layer / math.sqrt(self.attention_head_size)
         # [BSZ, NAT, L, L]
+        # attention_scores(batch, num_attention_heads=12, 561, 561) means we have 561 tokens,
+        # each tokens has attention score to all the 561 tokens. We have 12 attention head to express different attention needs.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         if self.has_relative_attention_bias:
-            attention_scores += rel_pos
+            attention_scores += rel_pos  # we mixed in position ids relative position attention score.
         if self.has_spatial_attention_bias:
-            attention_scores += rel_2d_pos
-        attention_scores = attention_scores.float().masked_fill_(attention_mask.to(torch.bool), float("-inf"))
+            attention_scores += rel_2d_pos  # we mixed in bbox 2d relative position attention score.
+        attention_scores = attention_scores.float().masked_fill_(attention_mask.to(torch.bool), float("-inf"))  # replace padding tokens with -inf.
+        # attention_probs(batch, num_attention_heads=12, 561, 561) softmax to get attention probabilities.
         attention_probs = F.softmax(attention_scores, dim=-1, dtype=torch.float32).type_as(value_layer)
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
         attention_probs = self.dropout(attention_probs)
+        # context_layer(batch, num_attention_heads=12, 561, 64). Each token of 561 is weighted sum(attention prob) of 561 64-valued vectors.
         context_layer = torch.matmul(attention_probs, value_layer)
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(*new_context_layer_shape)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()  # context_layer(batch, num_attention_heads=12, 561, 64) -> (batch, 561, num_attention_heads=12, 64)
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)  # new_context_layer_shape(batch, 561, 768)
+        context_layer = context_layer.view(*new_context_layer_shape)  # context_layer(batch, 561, 768) concatenate value vectors from 12 heads together.
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
         return outputs
@@ -210,6 +229,12 @@ class LayoutLMv2Attention(nn.Module):
         rel_pos=None,
         rel_2d_pos=None,
     ):
+        # hidden_states - final_emb(batch, 561=49+512, 768) combines text_layout_emb and visual_emb.
+        # attention_mask - extended_attention_mask(8, 1, 1, 561) contains 0 for attended word token and 49 visually cutted bboxes, -10000 for padding and others.
+        # rel_pos(batch, num_attention_heads=12, 561, 561) relative position information, or neighbour information, is calculated for input positions and visual bboxes positions.
+        # rel_2d_pos(batch, num_attention_heads=12, 561, 561) relative 2d position information, or neighbour information, is calculated for input bboxes and visually cut 49 bboxes.
+
+        # self_outputs[0](batch, 561, 768) concatenated value vectors from 12 heads together, with relative 1d and 2d position attention score mixed in.
         self_outputs = self.self(
             hidden_states,
             attention_mask,
@@ -221,7 +246,8 @@ class LayoutLMv2Attention(nn.Module):
             rel_pos=rel_pos,
             rel_2d_pos=rel_2d_pos,
         )
-        attention_output = self.output(self_outputs[0], hidden_states)
+        # apply dense + dropout + layernorm(with residual connection, namely input hidden_state is added as the final input to layernorm).
+        attention_output = self.output(self_outputs[0], hidden_states)  # attention_output(batch, 561, 768)
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
@@ -252,6 +278,11 @@ class LayoutLMv2Layer(nn.Module):
         rel_pos=None,
         rel_2d_pos=None,
     ):
+        # hidden_states - final_emb(batch, 561=49+512, 768) combines text_layout_emb and visual_emb.
+        # attention_mask - extended_attention_mask(8, 1, 1, 561) contains 0 for attended word token and 49 visually cutted bboxes, -10000 for padding and others.
+        # rel_pos(batch, num_attention_heads=12, 561, 561) relative position information, or neighbour information, is calculated for input positions and visual bboxes positions.
+        # rel_2d_pos(batch, num_attention_heads=12, 561, 561) relative 2d position information, or neighbour information, is calculated for input bboxes and visually cut 49 bboxes.
+
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
         self_attention_outputs = self.attention(
@@ -295,7 +326,7 @@ class LayoutLMv2Layer(nn.Module):
             # add cross-attn cache to positions 3,4 of present_key_value tuple
             cross_attn_present_key_value = cross_attention_outputs[-1]
             present_key_value = present_key_value + cross_attn_present_key_value
-
+        # feed forward layers.
         layer_output = apply_chunking_to_forward(
             self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
         )
@@ -314,25 +345,28 @@ class LayoutLMv2Layer(nn.Module):
 
 
 def relative_position_bucket(relative_position, bidirectional=True, num_buckets=32, max_distance=128):
-    ret = 0
+    ret = 0  # relative_position(batch, 561=512+49, 561) store relative positions with neighbors for all the 561 tokens. num_buckets=32, max_distance=128
     if bidirectional:
-        num_buckets //= 2
-        ret += (relative_position > 0).long() * num_buckets
-        n = torch.abs(relative_position)
+        num_buckets //= 2  # num_buckets=32//2=16
+        ret += (relative_position > 0).long() * num_buckets  # (relative_position > 0).long() to indicate right neighbours. ret(batch, 561=512+49, 561) with right neighbours set to 16 and others set to 0.
+        n = torch.abs(relative_position)  # n(batch, 561=512+49, 561), after abs, we cannot tell left or right neighbour with n.
     else:
         n = torch.max(-relative_position, torch.zeros_like(relative_position))
     # now n is in the range [0, inf)
 
     # half of the buckets are for exact increments in positions
-    max_exact = num_buckets // 2
-    is_small = n < max_exact
+    max_exact = num_buckets // 2  # max_exact = 16 // 2 = 8
+    is_small = n < max_exact  # is_small(batch, 561=512+49, 561) is to indicate the left and right neighbors that are within 8 steps. True for neighbors within 8 steps and False for others.
 
     # The other half of the buckets are for logarithmically bigger bins in positions up to max_distance
+    # log(n/8) / log(128/8) * (32 - 8)
+    # val_if_large(batch, 561=512+49, 561), for abs neighbors that are more than 8 steps away, the relative position grow slowly. Namely, we don't differentiate much.
     val_if_large = max_exact + (
         torch.log(n.float() / max_exact) / math.log(max_distance / max_exact) * (num_buckets - max_exact)
     ).to(torch.long)
-    val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
-
+    val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))  # we make sure the maximum relative position <= 15=num_buckets - 1.
+    # ret(batch, 561=512+49, 561) with near neighbors(within 8 steps) described exactly and far away neighbors(more than 8 steps) described logarithmically.
+    # left neighbors are in the range of (1 ~ 15), self is 0, and right neighbors are in the range of (17~31).
     ret += torch.where(is_small, n, val_if_large)
     return ret
 
@@ -360,22 +394,47 @@ class LayoutLMv2Encoder(nn.Module):
             self.rel_pos_y_bias = nn.Linear(self.rel_2d_pos_onehot_size, config.num_attention_heads, bias=False)
 
     def _cal_1d_pos_emb(self, hidden_states, position_ids):
+        # hidden_states - final_emb(batch, 561=49+512, 768) combines text_layout_emb and visual_emb.
+        # position_ids - final_position_ids(batch_size, 561 = 512 + 49) combines input position ids[0, 1, ..., 510, 511] and visual bboxes position ids [0, 1, ..., 47, 48]
+
+        # rel_pos_mat(batch, 561 = 512 + 49, 561) = position_ids.unsqueeze(-2)(batch, 1, 561) - position_ids.unsqueeze(-1)(batch, 561, 1)
+        # rel_pos_mat[0, 0, :] = [ 0,  1, ..., 510, 511,  0,  1, ..., 47, 48]
+        # rel_pos_mat[0, 1, :] = [-1,  0, ..., 509, 510, -1,  0, ..., 46, 47]
+        # rel_pos_mat[0, 2, :] = [-2, -1, ..., 508, 509, -2, -1, ..., 45, 46]
+        # rel_pos_mat store relative positions with neighbors for all the 561 tokens.
         rel_pos_mat = position_ids.unsqueeze(-2) - position_ids.unsqueeze(-1)
+        # rel_pos(batch, 561=512+49, 561) with near neighbors(within 8 steps) described exactly and far away neighbors(more than 8 steps) described logarithmically.
+        # left neighbors are in the range of (1 ~ 15), self is 0, and right neighbors are in the range of (17~31).
+        # rel_pos basically to describe near-by neighbour exactly and far-away neighbour briefly.
         rel_pos = relative_position_bucket(
             rel_pos_mat,
             num_buckets=self.rel_pos_bins,
             max_distance=self.max_rel_pos,
         )
+        # rel_pos(batch, 561=512+49, 561, 32) encoded as one-hot representation.
         rel_pos = F.one_hot(rel_pos, num_classes=self.rel_pos_onehot_size).type_as(hidden_states)
+        # project rel_pos into attention space. 32 one-hot values of each token is projected as an attention score for each attention head,
+        # we have 12 attention score for 12 attention heads. Each token has attention scores to all other tokens.
+        # These relative position attention scores will be combined in attention layer.
+        # rel_pos(batch, 561=512+49, 561, 32) -> self.rel_pos_bias(rel_pos)(batch, 561, 561, num_attention_heads=12)
+        #   -> permute(0, 3, 1, 2)(batch, num_attention_heads=12, 561, 561)
         rel_pos = self.rel_pos_bias(rel_pos).permute(0, 3, 1, 2)
-        rel_pos = rel_pos.contiguous()
+        rel_pos = rel_pos.contiguous()  # rel_pos(batch, num_attention_heads=12, 561, 561)
         return rel_pos
 
     def _cal_2d_pos_emb(self, hidden_states, bbox):
-        position_coord_x = bbox[:, :, 0]
-        position_coord_y = bbox[:, :, 3]
+        # hidden_states - final_emb(batch, 561=49+512, 768) combines text_layout_emb and visual_emb.
+        # bbox - final_bbox(batch_size, 561(512 + 49), 4) contains input bboxes and visually cut 49 bboxes.
+
+        position_coord_x = bbox[:, :, 0]  # position_coord_x(batch, 561) is top left x positions.
+        position_coord_y = bbox[:, :, 3]  # position_coord_y(batch, 561) is bottom right y positions.
+        # rel_pos_x_2d_mat store relative positions of neighbors for all the 561 tokens' top left x.
         rel_pos_x_2d_mat = position_coord_x.unsqueeze(-2) - position_coord_x.unsqueeze(-1)
+        # rel_pos_y_2d_mat store relative positions of neighbors for all the 561 tokens' bottom right y.
         rel_pos_y_2d_mat = position_coord_y.unsqueeze(-2) - position_coord_y.unsqueeze(-1)
+        # rel_pos_x/rel_pos_y(batch, 561=512+49, 561) with near neighbors(within 16 steps) described exactly and far away neighbors(more than 16 steps) described logarithmically.
+        # left neighbors are in the range of (1 ~ 31), self is 0, and right neighbors are in the range of (33~63).
+        # rel_pos_x/rel_pos_y basically to describe near-by neighbour exactly and far-away neighbour briefly.
         rel_pos_x = relative_position_bucket(
             rel_pos_x_2d_mat,
             num_buckets=self.rel_2d_pos_bins,
@@ -386,13 +445,20 @@ class LayoutLMv2Encoder(nn.Module):
             num_buckets=self.rel_2d_pos_bins,
             max_distance=self.max_rel_2d_pos,
         )
+        # rel_pos_x/rel_pos_y(batch, 561=512+49, 561, 64) encoded as one-hot representation.
         rel_pos_x = F.one_hot(rel_pos_x, num_classes=self.rel_2d_pos_onehot_size).type_as(hidden_states)
         rel_pos_y = F.one_hot(rel_pos_y, num_classes=self.rel_2d_pos_onehot_size).type_as(hidden_states)
+        # project rel_pos_x/rel_pos_y into attention space. 64 one-hot values of each token is projected as an attention score for each attention head,
+        # we have 12 attention score for 12 attention heads. Each token has attention scores to all other tokens.
+        # These relative position attention scores will be combined in attention layer.
+        # rel_pos_x/rel_pos_y(batch, 561=512+49, 561, 64) -> self.rel_pos_bias(rel_pos)(batch, 561, 561, num_attention_heads=12)
+        #   -> permute(0, 3, 1, 2)(batch, num_attention_heads=12, 561, 561)
         rel_pos_x = self.rel_pos_x_bias(rel_pos_x).permute(0, 3, 1, 2)
         rel_pos_y = self.rel_pos_y_bias(rel_pos_y).permute(0, 3, 1, 2)
+        # rel_pos_x/rel_pos_y(batch, num_attention_heads=12, 561, 561)
         rel_pos_x = rel_pos_x.contiguous()
         rel_pos_y = rel_pos_y.contiguous()
-        rel_2d_pos = rel_pos_x + rel_pos_y
+        rel_2d_pos = rel_pos_x + rel_pos_y  # combine x and y.
         return rel_2d_pos
 
     def forward(
@@ -410,13 +476,19 @@ class LayoutLMv2Encoder(nn.Module):
         bbox=None,
         position_ids=None,
     ):
+        # hidden_states - final_emb(batch, 561=49+512, 768) combines text_layout_emb and visual_emb.
+        # attention_mask - extended_attention_mask(8, 1, 1, 561) contains 0 for attended word token and 49 visually cutted bboxes, -10000 for padding and others.
+        # bbox - final_bbox(batch_size, 561(512 + 49), 4) contains input bboxes and visually cut 49 bboxes.
+        # position_ids - final_position_ids(batch_size, 561 = 512 + 49) combines input position ids[1, 2, ..., 510, 511] and visual bboxes position ids [1, 2, ..., 47, 48]
+        # head_mask list of 12 None for 12 layers.
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
 
         next_decoder_cache = () if use_cache else None
-
+        # rel_pos(batch, num_attention_heads=12, 561, 561) relative position information, or neighbour information, is calculated for input positions and visual bboxes positions.
         rel_pos = self._cal_1d_pos_emb(hidden_states, position_ids) if self.has_relative_attention_bias else None
+        # rel_2d_pos(batch, num_attention_heads=12, 561, 561) relative 2d position information, or neighbour information, is calculated for input bboxes and visually cut 49 bboxes.
         rel_2d_pos = self._cal_2d_pos_emb(hidden_states, bbox) if self.has_spatial_attention_bias else None
 
         for i, layer_module in enumerate(self.layer):
@@ -452,6 +524,10 @@ class LayoutLMv2Encoder(nn.Module):
                     rel_2d_pos=rel_2d_pos,
                 )
             else:
+                # hidden_states - final_emb(batch, 561=49+512, 768) combines text_layout_emb and visual_emb.
+                # attention_mask - extended_attention_mask(8, 1, 1, 561) contains 0 for attended word token and 49 visually cutted bboxes, -10000 for padding and others.
+                # rel_pos(batch, num_attention_heads=12, 561, 561) relative position information, or neighbour information, is calculated for input positions and visual bboxes positions.
+                # rel_2d_pos(batch, num_attention_heads=12, 561, 561) relative 2d position information, or neighbour information, is calculated for input bboxes and visually cut 49 bboxes.
                 layer_outputs = layer_module(
                     hidden_states,
                     attention_mask,
@@ -584,8 +660,8 @@ class VisualBackbone(nn.Module):
         self.register_buffer(
             "pixel_mean",
             torch.Tensor(self.cfg.MODEL.PIXEL_MEAN).view(num_channels, 1, 1),
-        )
-        self.register_buffer("pixel_std", torch.Tensor(self.cfg.MODEL.PIXEL_STD).view(num_channels, 1, 1))
+        )  # pixel_mean is assigned here.
+        self.register_buffer("pixel_std", torch.Tensor(self.cfg.MODEL.PIXEL_STD).view(num_channels, 1, 1))  # pixel_std is assigned here.
         self.out_feature_key = "p2"
         if torch.is_deterministic():
             logger.warning("using `AvgPool2d` instead of `AdaptiveAvgPool2d`")
@@ -603,11 +679,11 @@ class VisualBackbone(nn.Module):
             config.image_feature_pool_shape.append(self.backbone.output_shape()[self.out_feature_key].channels)
         assert self.backbone.output_shape()[self.out_feature_key].channels == config.image_feature_pool_shape[2]
 
-    def forward(self, images):      
-        images_input = ((images if torch.is_tensor(images) else images.tensor) - self.pixel_mean) / self.pixel_std
+    def forward(self, images):  # images(batch, channels, width, height)
+        images_input = ((images if torch.is_tensor(images) else images.tensor) - self.pixel_mean) / self.pixel_std  # standardized pixels.
         features = self.backbone(images_input)
-        features = features[self.out_feature_key]
-        features = self.pool(features).flatten(start_dim=2).transpose(1, 2).contiguous()
+        features = features[self.out_feature_key]  # features(batch, 256, 56, 56)
+        features = self.pool(features).flatten(start_dim=2).transpose(1, 2).contiguous()  # self.pool(features)(batch, 256, 7, 7) -> flatten(start_dim=2)(batch, 256, 49) -> transpose(1, 2)(batch, 49, 256) -> contiguous() remain the same.
         return features
 
 
@@ -644,31 +720,42 @@ class LayoutLMv2Model(LayoutLMv2PreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
 
-    def _calc_text_embeddings(self, input_ids, bbox, position_ids, token_type_ids):
-        seq_length = input_ids.size(1)
+    def _calc_text_embeddings(self, input_ids, bbox, position_ids, token_type_ids):  # input_ids(batch_size, 512), bbox(batch_size, 512, 4), position_ids(batch_size, 512), token_type_ids(batch_size, 512)
+        seq_length = input_ids.size(1)  # seq_length(512)
         if position_ids is None:
             position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
             position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
 
-        words_embeddings = self.embeddings.word_embeddings(input_ids)
-        position_embeddings = self.embeddings.position_embeddings(position_ids)
-        spatial_position_embeddings = self.embeddings._cal_spatial_position_embeddings(bbox)
-        token_type_embeddings = self.embeddings.token_type_embeddings(token_type_ids)
-        embeddings = words_embeddings + position_embeddings + spatial_position_embeddings + token_type_embeddings
-        embeddings = self.embeddings.LayerNorm(embeddings)
+        words_embeddings = self.embeddings.word_embeddings(input_ids)  # (batch_size, 512) -> (batch_size, 512, 768), taking embedding by word index.
+        position_embeddings = self.embeddings.position_embeddings(position_ids)  # (batch_size, 512) -> (batch_size, 512, 768), taking embedding by position index.
+        spatial_position_embeddings = self.embeddings._cal_spatial_position_embeddings(bbox)  # spatial_position_embeddings(batch_size, 512, 768(128 * 6)), which combines x1, y1, x2, y2, width and height embeddings.
+        token_type_embeddings = self.embeddings.token_type_embeddings(token_type_ids)  # self.embeddings.token_type_embeddings(2, 768). token_type_ids(batch_size, 512) -> (batch_size, 768).
+        embeddings = words_embeddings + position_embeddings + spatial_position_embeddings + token_type_embeddings  # combine 4 embedding vectors to produce final embedding vector: word vector, position vector, bounding box vector and token type vector.
+        embeddings = self.embeddings.LayerNorm(embeddings)  # normalize by mean and std on the last embedding dim(768).
         embeddings = self.embeddings.dropout(embeddings)
         return embeddings
 
     def _calc_img_embeddings(self, image, bbox, position_ids):
+        # bbox(batch, 49, 4) is visual bbox cutting 0 to 1000 area into 49 boxes.
+        # position_ids(batch, 49) is visual position ids for 49 visual boxes.
+        # image(batch, channel, width, height)
+
+        # image(batch, channel, width, height) -> self.visual(image) to apply visual cnn to get (batch, 49, 256)
+        #   -> self.visual_proj() project image to match text embedding dim to get (batch, 49, 768).
         visual_embeddings = self.visual_proj(self.visual(image))
+        # mapping to its position embedding by index to get position_embeddings(batch, 49, 768).
         position_embeddings = self.embeddings.position_embeddings(position_ids)
+        # spatial_position_embeddings(batch_size, 49, 768(128 * 6)),
+        # which combines x1, y1, x2, y2, width and height embeddings for 49 visual bboxes.
         spatial_position_embeddings = self.embeddings._cal_spatial_position_embeddings(bbox)
+        # embeddings(batch, 49, 768) combines 3 pieces of information: image representation vector,
+        # visually cutted 49 bboxes vector, visually cutted 49 bboxes position vector.
         embeddings = visual_embeddings + position_embeddings + spatial_position_embeddings
-        if self.has_visual_segment_embedding:
+        if self.has_visual_segment_embedding:  # we don't use has_visual_segment_embedding?
             embeddings += self.visual_segment_embedding
-        embeddings = self.visual_LayerNorm(embeddings)
+        embeddings = self.visual_LayerNorm(embeddings)  # normalize by mean and std on the last embedding dim(768).
         embeddings = self.visual_dropout(embeddings)
         return embeddings
 
@@ -687,7 +774,7 @@ class LayoutLMv2Model(LayoutLMv2PreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
-    ):
+    ):  # attention_mask(batch, 512) contains 1 for word token to attend and 0 for padding or others.
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -705,12 +792,12 @@ class LayoutLMv2Model(LayoutLMv2PreTrainedModel):
 
         device = input_ids.device if input_ids is not None else inputs_embeds.device
 
-        visual_shape = list(input_shape)
-        visual_shape[1] = self.config.image_feature_pool_shape[0] * self.config.image_feature_pool_shape[1]
-        visual_shape = torch.Size(visual_shape)
+        visual_shape = list(input_shape)  # input_shape(batch_size, 512)
+        visual_shape[1] = self.config.image_feature_pool_shape[0] * self.config.image_feature_pool_shape[1]  # 7 * 7 = 49
+        visual_shape = torch.Size(visual_shape)  # (batch_size, 7 * 7 = 49)
         final_shape = list(input_shape)
         final_shape[1] += visual_shape[1]
-        final_shape = torch.Size(final_shape)
+        final_shape = torch.Size(final_shape)  # batch_size * 561(512 + 49), which merges input_shape and visual_shape.
 
         visual_bbox_x = (
             torch.arange(
@@ -721,7 +808,7 @@ class LayoutLMv2Model(LayoutLMv2PreTrainedModel):
                 dtype=bbox.dtype,
             )
             // self.config.image_feature_pool_shape[1]
-        )
+        )  # tensor([   0,  142,  285,  428,  571,  714,  857, 1000])
         visual_bbox_y = (
             torch.arange(
                 0,
@@ -731,7 +818,7 @@ class LayoutLMv2Model(LayoutLMv2PreTrainedModel):
                 dtype=bbox.dtype,
             )
             // self.config.image_feature_pool_shape[0]
-        )
+        )  # tensor([   0,  142,  285,  428,  571,  714,  857, 1000])
         visual_bbox = torch.stack(
             [
                 visual_bbox_x[:-1].repeat(self.config.image_feature_pool_shape[0], 1),
@@ -740,50 +827,52 @@ class LayoutLMv2Model(LayoutLMv2PreTrainedModel):
                 visual_bbox_y[1:].repeat(self.config.image_feature_pool_shape[1], 1).transpose(0, 1),
             ],
             dim=-1,
-        ).view(-1, bbox.size(-1))
-        visual_bbox = visual_bbox.repeat(final_shape[0], 1, 1)
-        final_bbox = torch.cat([bbox, visual_bbox], dim=1)
+        ).view(-1, bbox.size(-1))  # shape is (49, 4). All combinations of visual_bbox_x and visual_bbox_y. The first box is [0, 0, 142, 142] and the last box is [ 857,  857, 1000, 1000]. Basically to cut 0 to 1000 area into 49 boxes.
+        visual_bbox = visual_bbox.repeat(final_shape[0], 1, 1)  # replicate visual_bbox batch_size times. The shape becomes (batch_size, 49, 4).
+        final_bbox = torch.cat([bbox, visual_bbox], dim=1)  # final_bbox(batch_size, 561(512 + 49), 4) contains input bboxes and visually cutted 49 bboxes.
 
         if attention_mask is None:
             attention_mask = torch.ones(input_shape, device=device)
 
-        visual_attention_mask = torch.ones(visual_shape, device=device)
-        final_attention_mask = torch.cat([attention_mask, visual_attention_mask], dim=1)
+        visual_attention_mask = torch.ones(visual_shape, device=device)  # (batch_size, 49)
+        final_attention_mask = torch.cat([attention_mask, visual_attention_mask], dim=1)  # final_attention_mask(batch_size, 561(512 + 49)) combines input text attention and 49 visually cutted bboxes attention.
 
         if token_type_ids is None:
             token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
 
         if position_ids is None:
             seq_length = input_shape[1]
-            position_ids = self.embeddings.position_ids[:, :seq_length]
-            position_ids = position_ids.expand_as(input_ids)
+            position_ids = self.embeddings.position_ids[:, :seq_length]  # shape (1, 512) and value [[0, 1, ..., 510, 511]]
+            position_ids = position_ids.expand_as(input_ids)  # expand as the same as input_ids, which is of shape (batch_size, 512). Therefore, position_ids is replicated batch_size times.
 
         visual_position_ids = torch.arange(0, visual_shape[1], dtype=torch.long, device=device).repeat(
             input_shape[0], 1
-        )
-        final_position_ids = torch.cat([position_ids, visual_position_ids], dim=1)
+        )  # shape (batch_size, 49) and value of visual_position_ids[0] is [0, 1, ..., 47, 48], visual position ids for 49 visual boxes.
+        final_position_ids = torch.cat([position_ids, visual_position_ids], dim=1)  # final_position_ids(batch_size, 561 = 512 + 49) combines input position ids[1, 2, ..., 510, 511] and visual bboxes position ids [1, 2, ..., 47, 48]
 
         if bbox is None:
             bbox = torch.zeros(tuple(list(input_shape) + [4]), dtype=torch.long, device=device)
-
+        # text_layout_emb(batch, 512, 768) combines 4 pieces of information: word vector, position vector,
+        # bounding box vector and token type vector.
         text_layout_emb = self._calc_text_embeddings(
             input_ids=input_ids,
             bbox=bbox,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
         )
-
+        # visual_emb(batch, 49, 768) combines 3 pieces of information: 49 convolved image representation vector,
+        # visually cut 49 bboxes vector, visually cut 49 bboxes position vector.
         visual_emb = self._calc_img_embeddings(
             image=image,
             bbox=visual_bbox,
             position_ids=visual_position_ids,
         )
-        final_emb = torch.cat([text_layout_emb, visual_emb], dim=1)
+        final_emb = torch.cat([text_layout_emb, visual_emb], dim=1)  # final_emb(batch, 561=49+512, 768) combines text_layout_emb and visual_emb.
 
-        extended_attention_mask = final_attention_mask.unsqueeze(1).unsqueeze(2)
+        extended_attention_mask = final_attention_mask.unsqueeze(1).unsqueeze(2)  # final_attention_mask(batch, 561=512+49) -> extended_attention_mask(batch, 1, 1, 561)
 
         extended_attention_mask = extended_attention_mask.to(dtype=self.dtype)
-        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0  # extended_attention_mask contains 0 for attended word token and 49 visually cutted bboxes, -10000 for padding and others.
 
         if head_mask is not None:
             if head_mask.dim() == 1:
