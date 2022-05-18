@@ -27,6 +27,7 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
+import utils
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -35,18 +36,21 @@ check_min_version("4.5.0")
 logger = logging.getLogger(__name__)
 
 
-def main():
+# def main():
+def main(args):
     # See all possible arguments in layoutlmft/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # If we pass only one argument to the script and it's the path to a json file,
-        # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
-    else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    model_args, data_args, training_args = parser.parse_args_into_dataclasses(args=args)
+    # if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+    #     # If we pass only one argument to the script and it's the path to a json file,
+    #     # let's parse it to get our arguments.
+    #     model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    # else:
+    #     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    utils.seed_everything(seed=training_args.seed)
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -358,10 +362,25 @@ def main():
                     writer.write(" ".join(prediction) + "\n")
 
 
-def _mp_fn(index):
-    # For xla_spawn (TPUs)
-    main()
+def local_main():
+    args = []
+    args.extend([
+        # "--model_name_or_path", "microsoft/layoutlm-base-uncased",
+        "--model_name_or_path", "microsoft/layoutlmv2-base-uncased",
+        "--output_dir", "./output",
+        "--do_train",
+        "--do_predict",
+        "--max_steps", "1000",
+        "--warmup_ratio", "0.1"
+    ])
+    main(args)
+
+
+# def _mp_fn(index):
+#     # For xla_spawn (TPUs)
+#     main()
 
 
 if __name__ == "__main__":
-    main()
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # disable GPU
+    local_main()

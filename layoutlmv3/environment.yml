@@ -1,0 +1,10 @@
+# conda env create -f environment.yml
+name: layoutlmv3
+channels:
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.8.5
+  - pip
+  - pip:
+    - --requirement requirements_local.txt

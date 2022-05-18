@@ -62,6 +62,7 @@ class PatchEmbed(nn.Module):
         self.num_patches_h = self.patch_shape[1]
 
     def forward(self, x, position_embedding=None):
+        # x(batch_size, channel_size, height, width) -> x(batch_size, emd_size(# filters), height, width)
         x = self.proj(x)
 
         if position_embedding is not None:
@@ -70,7 +71,8 @@ class PatchEmbed(nn.Module):
             Hp, Wp = x.shape[2], x.shape[3]
             position_embedding = F.interpolate(position_embedding, size=(Hp, Wp), mode='bicubic')
             x = x + position_embedding
-
+        # x(batch_size, n_patches, emd_size)
+        # x is 2d convolution result,which convolves patch by batch. Now each patch is represented by #emb_size numbers.
         x = x.flatten(2).transpose(1, 2)
         return x
 
@@ -103,8 +105,11 @@ class LayoutLMv3Embeddings(nn.Module):
         self.w_position_embeddings = nn.Embedding(config.max_2d_position_embeddings, config.shape_size)
 
     def _calc_spatial_position_embeddings(self, bbox):
+        # bbox(batch_size, seq_len, 4)
         try:
             assert torch.all(0 <= bbox) and torch.all(bbox <= 1023)
+            # left_position_embeddings(batch_size, seq_len, 128); All possible x values from 0 to 1000(max 1024)
+            # are embedded into 128 dimensional space.
             left_position_embeddings = self.x_position_embeddings(bbox[:, :, 0])
             upper_position_embeddings = self.y_position_embeddings(bbox[:, :, 1])
             right_position_embeddings = self.x_position_embeddings(bbox[:, :, 2])
@@ -114,7 +119,8 @@ class LayoutLMv3Embeddings(nn.Module):
 
         h_position_embeddings = self.h_position_embeddings(torch.clip(bbox[:, :, 3] - bbox[:, :, 1], 0, 1023))
         w_position_embeddings = self.w_position_embeddings(torch.clip(bbox[:, :, 2] - bbox[:, :, 0], 0, 1023))
-
+        # spatial_position_embeddings(batch_size, seq_len, emd_size) combines left, right, upper, lower, height
+        # and width information from bbox.
         # below is the difference between LayoutLMEmbeddingsV2 (torch.cat) and LayoutLMEmbeddingsV1 (add)
         spatial_position_embeddings = torch.cat(
             [
@@ -153,9 +159,13 @@ class LayoutLMv3Embeddings(nn.Module):
         inputs_embeds=None,
         past_key_values_length=0,
     ):
+        # LayoutLMv3Embeddings is to create text embeddings.
+
         if position_ids is None:
             if input_ids is not None:
                 # Create the position ids from the input token ids. Any padded tokens remain padded.
+                # position_ids(batch_size, seq_len)[[2, 3, 4, ..., 1], ...]
+                # position id starts from 2 with padding id 1.
                 position_ids = self.create_position_ids_from_input_ids(
                     input_ids, self.padding_idx, past_key_values_length).to(input_ids.device)
             else:
@@ -170,9 +180,14 @@ class LayoutLMv3Embeddings(nn.Module):
             token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
 
         if inputs_embeds is None:
+            # input_ids(batch_size, seq_len); inputs_embeds(batch_size, seq_len, emd_size)
             inputs_embeds = self.word_embeddings(input_ids)
+        # token_type_ids(batch_size, seq_len); token_type_embeddings(batch_size, seq_len, emd_size)
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
+        # embeddings(batch_size, seq_len, emd_size).
+        # embeddings = inputs_embeds + token_type_embeddings + position_embeddings + spatial_position_embeddings.
+        # spatial_position_embeddings(batch_size, seq_len, emd_size) combines left, right, upper, lower, height and
+        # width information from bbox.
         embeddings = inputs_embeds + token_type_embeddings
         position_embeddings = self.position_embeddings(position_ids)
         embeddings += position_embeddings
@@ -252,6 +267,11 @@ class LayoutLMv3SelfAttention(nn.Module):
         self.has_spatial_attention_bias = config.has_spatial_attention_bias
 
     def transpose_for_scores(self, x):
+        # We project x together for all attention heads instead of one by one. Each input token is described be
+        # #proj_size values. Namely, each head has #head_proj_size=#proj_size/#n_attention_heads values.
+        # x(batch_size, input_patch_len, proj_size)
+        #   -> x.view(*new_x_shape)(batch_size, input_patch_len, n_attention_heads, head_proj_size)
+        #   -> x.permute(0, 2, 1, 3)(batch_size, n_attention_heads, input_patch_len, head_proj_size)
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
@@ -283,6 +303,15 @@ class LayoutLMv3SelfAttention(nn.Module):
         rel_pos=None,
         rel_2d_pos=None,
     ):
+        # hidden_states(batch_size, input_patch_len, emd_size) contains both textual embedding and visual embedding.
+        # attention_mask(batch_size, 1, 1, seq_len+n_batches+1) contains value of 0.0 to attend
+        #   and -10000(big negative value) to ignore. as these values will be added to raw value before softmax.
+        # rel_pos(batch, num_attention_heads=12, input_patch_len, input_patch_len) relative position information
+        #   or neighbour information. It is calculated for input positions and patch positions.
+        # rel_2d_pos(batch, num_attention_heads=12, input_patch_len, input_patch_len) relative 2d position
+        #   information or neighbour information. It is calculated for input bboxes and patch bboxes.
+
+        # mixed_query_layer(batch_size, input_patch_len, emd_size) compute projected query matrix.
         mixed_query_layer = self.query(hidden_states)
 
         # If this is instantiated as a cross-attention module, the keys
@@ -305,17 +334,31 @@ class LayoutLMv3SelfAttention(nn.Module):
             key_layer = torch.cat([past_key_value[0], key_layer], dim=2)
             value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
         else:
+            # We project hidden_states into key/value space together for all attention heads instead of one by one.
+            # Each input token is described be #proj_size values. Namely, each head
+            # has #head_proj_size=#proj_size/#n_attention_heads values, which is done by self.transpose_for_scores.
+            #
+            # self.key/value(hidden_states)(batch_size, input_patch_len, emd_size)
+            #   -> self.transpose_for_scores(...)(batch_size, n_attn_heads, input_patch_len, head_proj_size)
             key_layer = self.transpose_for_scores(self.key(hidden_states))
             value_layer = self.transpose_for_scores(self.value(hidden_states))
-
+        # Same as key_layer/value_layer.
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         # The attention scores QT K/√d could be significantly larger than input elements, and result in overflow.
         # Changing the computational order into QT(K/√d) alleviates the problem. (https://arxiv.org/pdf/2105.13290.pdf)
+        # query_layer/key_layer(batch_size, n_attn_heads, input_patch_len, head_proj_size).
+        # Each matrix(input_patch_len, head_proj_size) is representation of all tokens for an attention head.
+        # When we dot product [matrix(input_patch_len, head_proj_size) dot matrix(head_proj_size, input_patch_len)],
+        # we get correlation between tokens(or covariance with different in magnitude), which can be interpreted as
+        # raw attention scores.
+        # attention_scores(batch_size, n_attn_heads, input_patch_len, input_patch_len)
         attention_scores = torch.matmul(query_layer / math.sqrt(self.attention_head_size), key_layer.transpose(-1, -2))
 
         if self.has_relative_attention_bias and self.has_spatial_attention_bias:
+            # we mix in position ids and bbox 2d relative position attention score.
+            # rel_pos contains raw attention scores of relative position(or relative position correlation information).
             attention_scores += (rel_pos + rel_2d_pos) / math.sqrt(self.attention_head_size)
         elif self.has_relative_attention_bias:
             attention_scores += rel_pos / math.sqrt(self.attention_head_size)
@@ -328,10 +371,13 @@ class LayoutLMv3SelfAttention(nn.Module):
         # attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         if attention_mask is not None:
             # Apply the attention mask is (precomputed for all layers in RobertaModel forward() function)
+            # attention_mask is applied to raw attention_scores before softmax, so that -10,000 for masked value will
+            # be equivalent to mask out the field. attention_scores(
             attention_scores = attention_scores + attention_mask
 
         # Normalize the attention scores to probabilities.
         # attention_probs = nn.Softmax(dim=-1)(attention_scores)  # comment the line below and use this line for speedup
+        # attention_probs(batch_size, n_attn_heads, input_patch_len, input_patch_len) softmax to get attention probabilities.
         attention_probs = self.cogview_attn(attention_scores)  # to stablize training
         # assert torch.allclose(attention_probs, nn.Softmax(dim=-1)(attention_scores), atol=1e-8)
 
@@ -342,11 +388,14 @@ class LayoutLMv3SelfAttention(nn.Module):
         # Mask heads if we want to
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
-
+        # context_layer(batch, n_attention_heads=12, input_patch_len, head_proj_size).
+        # Each token is weighted sum of all 64-valued token vectors, by row dot matrix view of the two matrices below.
+        # [attention_probs(..., input_patch_len, input_patch_len) dot value_layer (...,input_patch_len,head_proj_size)]
         context_layer = torch.matmul(attention_probs, value_layer)
-
+        # context_layer(batch_size, input_patch_len, n_attention_heads, head_proj_size).
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        # context_layer(batch_size, input_patch_len, emd_size)
         context_layer = context_layer.view(*new_context_layer_shape)
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
@@ -402,7 +451,7 @@ class LayoutLMv3Attention(nn.Module):
             rel_pos=rel_pos,
             rel_2d_pos=rel_2d_pos,
         )
-        attention_output = self.output(self_outputs[0], hidden_states)
+        attention_output = self.output(self_outputs[0], hidden_states)  # hidden_states is for skip connection.
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
@@ -430,6 +479,14 @@ class LayoutLMv3Layer(nn.Module):
         rel_pos=None,
         rel_2d_pos=None,
     ):
+        # hidden_states(batch_size, input_patch_len, emd_size) contains both textual embedding and visual embedding.
+        # attention_mask(batch_size, 1, 1, seq_len+n_batches+1) contains value of 0.0 to attend
+        #   and -10000(big negative value) to ignore. as these values will be added to raw value before softmax.
+        # rel_pos(batch, num_attention_heads=12, input_patch_len, input_patch_len) relative position information
+        #   or neighbour information. It is calculated for input positions and patch positions.
+        # rel_2d_pos(batch, num_attention_heads=12, input_patch_len, input_patch_len) relative 2d position
+        #   information or neighbour information. It is calculated for input bboxes and patch bboxes.
+
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
         self_attention_outputs = self.attention(
@@ -444,7 +501,7 @@ class LayoutLMv3Layer(nn.Module):
         attention_output = self_attention_outputs[0]
 
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
-
+        # feed forward layers.
         layer_output = apply_chunking_to_forward(
             self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
         )
@@ -505,46 +562,97 @@ class LayoutLMv3Encoder(nn.Module):
             self.ops = [self.fpn1, self.fpn2, self.fpn3, self.fpn4]
 
     def relative_position_bucket(self, relative_position, bidirectional=True, num_buckets=32, max_distance=128):
+        # relative_position(batch_size, seq_len+n_patches+1, seq_len+n_patches+1) store relative positions with
+        # neighbors for all the (seq_len+n_patches+1) tokens.
         ret = 0
         if bidirectional:
-            num_buckets //= 2
+            num_buckets //= 2  # num_buckets=32//2=16
+            # (relative_position > 0).long() to indicate right neighbours.
+            # ret(batch_size, seq_len+n_patches+1, seq_len+n_patches+1) with right neighbours set to 16
+            # and others set to 0.
             ret += (relative_position > 0).long() * num_buckets
+            # n(batch_size, seq_len+n_patches+1, seq_len+n_patches+1), after abs, we cannot tell left or
+            # right neighbour with n.
             n = torch.abs(relative_position)
         else:
             n = torch.max(-relative_position, torch.zeros_like(relative_position))
         # now n is in the range [0, inf)
 
         # half of the buckets are for exact increments in positions
-        max_exact = num_buckets // 2
+        max_exact = num_buckets // 2  # max_exact = 16 // 2 = 8
+        # is_small(batch, seq_len+n_patches+1, seq_len+n_patches+1) is to indicate the left and right neighbors
+        # that are within 8 steps. True for neighbors within 8 steps and False for others.
         is_small = n < max_exact
 
         # The other half of the buckets are for logarithmically bigger bins in positions up to max_distance
         val_if_large = max_exact + (
                 torch.log(n.float() / max_exact) / math.log(max_distance / max_exact) * (num_buckets - max_exact)
         ).to(torch.long)
+        # log(n/8) / log(128/8) * (32 - 8)
+        # val_if_large(batch, seq_len+n_patches+1, seq_len+n_patches+1), for abs neighbors that are more than 8 steps
+        # away, the relative position grow slowly. Namely, we don't differentiate much.
         val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
 
+        # ret(batch, 561=512+49, 561) with near neighbors(within 8 steps) described exactly(by n) and
+        # far away neighbors(more than 8 steps) described logarithmically (by val_if_large).
+        # left neighbors are in the range of (1 ~ 15), self is 0, and right neighbors are in the range of (17~31).
         ret += torch.where(is_small, n, val_if_large)
         return ret
 
     def _cal_1d_pos_emb(self, hidden_states, position_ids):
-        rel_pos_mat = position_ids.unsqueeze(-2) - position_ids.unsqueeze(-1)
+        # hidden_states(batch_size, seq_len+n_patches+1, emd_size) contains both textual embedding and visual embedding.
+        # position_ids(batch_size, seq_len+n_patches+1)[[0,1,2...511,0,1, 196], ...]
 
+        # rel_pos_mat(batch_size, seq_len+n_patches+1, seq_len+n_patches+1) =
+        #       position_ids.unsqueeze(-2)(batch_size, 1, seq_len+n_patches+1)
+        #       - position_ids.unsqueeze(-1)(batch_size, seq_len+n_patches+1, 1)
+        # Each matrix in rel_pos_mat is (seq_len+n_patches+1, seq_len+n_patches+1). rel_pos_mat[0, 0, :]
+        # represents difference between all positions to the first position. rel_pos_mat[0, 1, :] represents difference
+        # between all the positions to the second position.
+        # rel_pos_mat[0, 0, 1] will have opposite value to rel_pos_mat[0, 1, 0], as rel_pos_mat[0, 0, 1] represents
+        # difference between position 1 and position 0, and rel_pos_mat[0, 1, 0] represents difference between
+        # position 0 and position 1.
+        # rel_pos_mat[0, 0, :] = [ 0,  1, ..., 510, 511,  0,  1, ..., 195, 196]
+        # rel_pos_mat[0, 1, :] = [-1,  0, ..., 509, 510, -1,  0, ..., 194, 195]
+        # rel_pos_mat[0, 2, :] = [-2, -1, ..., 508, 509, -2, -1, ..., 193, 194]
+        # rel_pos_mat store relative positions with neighbors for all the (seq_len+n_patches+1) tokens.
+        rel_pos_mat = position_ids.unsqueeze(-2) - position_ids.unsqueeze(-1)
+        # rel_pos(batch_size, seq_len+n_patches+1, seq_len+n_patches+1) with near neighbors(within 8 steps) described
+        # exactly and far away neighbors(more than 8 steps) described logarithmically.
+        # left neighbors are in the range of (1 ~ 15), self is 0, and right neighbors are in the range of (17~31).
+        # rel_pos basically to describe near-by neighbour exactly and far-away neighbour briefly.
         rel_pos = self.relative_position_bucket(
             rel_pos_mat,
             num_buckets=self.rel_pos_bins,
             max_distance=self.max_rel_pos,
         )
+        # rel_pos(batch, seq_len+n_patches+1, seq_len+n_patches+1, 32) encoded as one-hot representation.
         rel_pos = F.one_hot(rel_pos, num_classes=self.rel_pos_onehot_size).type_as(hidden_states)
+        # Project relative position(or relative position correlation information), rel_pos, into attention space.
+        # 32 one-hot values of each token is projected as multiple values, each value being a raw attention score for
+        # each attention head. We have 12 attention score for 12 attention heads. Each token has attention scores to
+        # all other tokens. These relative position attention scores will be combined in attention layer.
+        # rel_pos(batch_size, seq_len+n_patches+1, seq_len+n_patches+1, 32)
+        #   -> self.rel_pos_bias(rel_pos)(batch_size, seq_len+n_patches+1, seq_len+n_patches+1, num_attention_heads=12)
+        #   -> permute(0, 3, 1, 2)(batch_size, num_attention_heads=12, seq_len+n_patches+1, seq_len+n_patches+1)
         rel_pos = self.rel_pos_bias(rel_pos).permute(0, 3, 1, 2)
         rel_pos = rel_pos.contiguous()
         return rel_pos
 
     def _cal_2d_pos_emb(self, hidden_states, bbox):
-        position_coord_x = bbox[:, :, 0]
-        position_coord_y = bbox[:, :, 3]
+        # hidden_states(batch_size, input_patch_len, emd_size) contains both textual embedding and visual embedding.
+        # bbox(batch_size, input_patch_len, 4) contains both input bboxes and patch bboxes.
+
+        position_coord_x = bbox[:, :, 0]  # position_coord_x(batch_size, input_patch_len) is top left x positions.
+        position_coord_y = bbox[:, :, 3]  # position_coord_y(batch_size, input_patch_len) is bottom right y positions.
+        # rel_pos_x_2d_mat store relative positions of neighbors for all the #input_patch_len tokens' top left x.
         rel_pos_x_2d_mat = position_coord_x.unsqueeze(-2) - position_coord_x.unsqueeze(-1)
+        # rel_pos_y_2d_mat store relative positions of neighbors for all the #input_patch_len tokens' bottom right y.
         rel_pos_y_2d_mat = position_coord_y.unsqueeze(-2) - position_coord_y.unsqueeze(-1)
+        # rel_pos_x/rel_pos_y(batch_size, input_patch_len, input_patch_len) with near neighbors(within 16 steps)
+        # described exactly and far away neighbors(more than 16 steps) described logarithmically.
+        # left neighbors are in the range of (1 ~ 31), self is 0, and right neighbors are in the range of (33~63).
+        # rel_pos_x/rel_pos_y basically to describe near-by neighbour exactly and far-away neighbour briefly.
         rel_pos_x = self.relative_position_bucket(
             rel_pos_x_2d_mat,
             num_buckets=self.rel_2d_pos_bins,
@@ -555,13 +663,22 @@ class LayoutLMv3Encoder(nn.Module):
             num_buckets=self.rel_2d_pos_bins,
             max_distance=self.max_rel_2d_pos,
         )
+        # rel_pos_x/rel_pos_y(batch_size, input_patch_len, input_patch_len, 64) encoded as one-hot representation.
         rel_pos_x = F.one_hot(rel_pos_x, num_classes=self.rel_2d_pos_onehot_size).type_as(hidden_states)
         rel_pos_y = F.one_hot(rel_pos_y, num_classes=self.rel_2d_pos_onehot_size).type_as(hidden_states)
+        # Project rel_pos_x/rel_pos_y into attention space. 64 one-hot values of each token is projected as
+        # an attention score for each attention head. We have 12 attention score for 12 attention heads.
+        # Each token has attention scores to all other tokens. These relative position attention scores will be
+        # combined in attention layer.
+        # rel_pos_x/rel_pos_y(batch_size, input_patch_len, input_patch_len, 64)
+        #   -> self.rel_pos_bias(rel_pos_x/rel_pos_y)(batch_size,input_patch_len,input_patch_len,num_attention_heads=12)
+        #   -> permute(0, 3, 1, 2)(batch_size, num_attention_heads=12, input_patch_len, input_patch_len)
         rel_pos_x = self.rel_pos_x_bias(rel_pos_x).permute(0, 3, 1, 2)
         rel_pos_y = self.rel_pos_y_bias(rel_pos_y).permute(0, 3, 1, 2)
+        # rel_pos_x/rel_pos_y(batch, num_attention_heads=12, input_patch_len, input_patch_len)
         rel_pos_x = rel_pos_x.contiguous()
         rel_pos_y = rel_pos_y.contiguous()
-        rel_2d_pos = rel_pos_x + rel_pos_y
+        rel_2d_pos = rel_pos_x + rel_pos_y  # combine x and y.
         return rel_2d_pos
 
     def forward(
@@ -581,13 +698,22 @@ class LayoutLMv3Encoder(nn.Module):
         Hp=None,
         Wp=None
     ):
+        # hidden_states(batch_size, seq_len+n_patches+1, emd_size) contains both textual embedding and visual embedding.
+        # bbox(batch_size, seq_len+n_batches+1, 4) contains bounding boxes, cls_visual_box and patch boxes.
+        # attention_mask(batch_size, 1, 1, seq_len+n_batches+1) contains value of 0.0 to attend
+        #           and -10000(big negative value) to ignore. as these values will be added to raw value before softmax.
+        # position_ids(batch_size, seq_len+n_patches+1)[[0,1,2...511,0,1, 196], ...]
+
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
 
         next_decoder_cache = () if use_cache else None
-
+        # rel_pos(batch_size, num_attention_heads=12, seq_len+n_patches+1, seq_len+n_patches+1) is relative position
+        # information or neighbour information, is calculated for input positions and patch bboxes positions.
         rel_pos = self._cal_1d_pos_emb(hidden_states, position_ids) if self.has_relative_attention_bias else None
+        # rel_2d_pos(batch, num_attention_heads=12, seq_len+n_patches+1, seq_len+n_patches+1) is relative 2d position
+        # information or neighbour information, is calculated for input bboxes and patch bboxes.
         rel_2d_pos = self._cal_2d_pos_emb(hidden_states, bbox) if self.has_spatial_attention_bias else None
 
         if self.detection:
@@ -631,6 +757,13 @@ class LayoutLMv3Encoder(nn.Module):
                     rel_2d_pos
                 )
             else:
+                # hidden_states(batch_size, input_patch_len, emd_size) contains both textual embedding and visual embedding.
+                # attention_mask(batch_size, 1, 1, seq_len+n_batches+1) contains value of 0.0 to attend
+                #   and -10000(big negative value) to ignore. as these values will be added to raw value before softmax.
+                # rel_pos(batch, num_attention_heads=12, input_patch_len, input_patch_len) relative position information
+                #   or neighbour information. It is calculated for input positions and patch positions.
+                # rel_2d_pos(batch, num_attention_heads=12, input_patch_len, input_patch_len) relative 2d position
+                #   information or neighbour information. It is calculated for input bboxes and patch bboxes.
                 layer_outputs = layer_module(
                     hidden_states,
                     attention_mask,
@@ -763,12 +896,16 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
         self.visual_bbox = torch.cat([cls_token_box, visual_bbox], dim=0)
 
     def _calc_visual_bbox(self, device, dtype, bsz):  # , img_size=(14, 14), max_len=1000):
+        # visual_box(n_batches+1, 4) represents equal size patch boxes(left, top, right, bottom).
+        # There is a visual cls_token_box is appended in the front.
+        # -> visual_box(batch_size, n_batches+1, 4)
         visual_bbox = self.visual_bbox.repeat(bsz, 1, 1)
         visual_bbox = visual_bbox.to(device).type(dtype)
         return visual_bbox
 
     def forward_image(self, x):
         if self.detection:
+            # x(batch_size, n_patches, emd_size), each patch represented by an embedding of size #emd_size.
             x = self.patch_embed(x, self.pos_embed[:, 1:, :] if self.pos_embed is not None else None)
         else:
             x = self.patch_embed(x)
@@ -777,10 +914,10 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         if self.pos_embed is not None and self.detection:
             cls_tokens = cls_tokens + self.pos_embed[:, :1, :]
-
+        # cls tokens embedding is appended in the front.
         x = torch.cat((cls_tokens, x), dim=1)
         if self.pos_embed is not None and not self.detection:
-            x = x + self.pos_embed
+            x = x + self.pos_embed # add positional information to image embedding.
         x = self.pos_drop(x)
 
         x = self.norm(x)
@@ -874,7 +1011,9 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
         if not self.image_only:
             if bbox is None:
                 bbox = torch.zeros(tuple(list(input_shape) + [4]), dtype=torch.long, device=device)
-
+            # embedding_output(batch_size, seq_len, emd_size) is textual embedding.
+            # embedding_output = input_ids_embeddings + token_type_embeddings + position_embeddings
+            #                       + spatial_position_embeddings(bbox)
             embedding_output = self.embeddings(
                 input_ids=input_ids,
                 bbox=bbox,
@@ -889,7 +1028,7 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
         if images is not None:
             patch_size = 16
             Hp, Wp = int(images.shape[2] / patch_size), int(images.shape[3] / patch_size)
-            visual_emb = self.forward_image(images)
+            visual_emb = self.forward_image(images) # visual_emb(batch_size, n_patches+1, emd_size). visual_emb contains image patch embeddings and its positional embeddings.
             if self.detection:
                 visual_attention_mask = torch.ones((batch_size, visual_emb.shape[1]), dtype=torch.long, device=device)
                 if self.image_only:
@@ -901,12 +1040,14 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
 
             if self.config.has_relative_attention_bias or self.config.has_spatial_attention_bias:
                 if self.config.has_spatial_attention_bias:
-                    visual_bbox = self._calc_visual_bbox(device, dtype=torch.long, bsz=batch_size)
+                    visual_bbox = self._calc_visual_bbox(device, dtype=torch.long, bsz=batch_size) # visual_box(batch_size, n_batches+1, 4)
                     if self.image_only:
                         final_bbox = visual_bbox
                     else:
+                        # final_bbox(batch_size, seq_len+n_batches+1, 4) contains bounding boxes, cls_visual_box
+                        # and patch boxes.
                         final_bbox = torch.cat([bbox, visual_bbox], dim=1)
-
+                # visual_position_ids(batch_size, n_patches+1)[[0, 1, 2, ...],...]
                 visual_position_ids = torch.arange(0, visual_emb.shape[1], dtype=torch.long, device=device).repeat(
                     batch_size, 1)
                 if self.image_only:
@@ -914,11 +1055,14 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
                 else:
                     position_ids = torch.arange(0, input_shape[1], device=device).unsqueeze(0)
                     position_ids = position_ids.expand_as(input_ids)
+                    # final_position_ids(batch_size, seq_len+n_patches+1)[[0,1,2...511,0,1, 196], ...]
                     final_position_ids = torch.cat([position_ids, visual_position_ids], dim=1)
 
             if self.image_only:
                 embedding_output = visual_emb
             else:
+                # embedding_output(batch_size, seq_len+n_patches+1, emd_size) contains both textual embedding
+                # and visual embedding.
                 embedding_output = torch.cat([embedding_output, visual_emb], dim=1)
             embedding_output = self.LayerNorm(embedding_output)
             embedding_output = self.dropout(embedding_output)
@@ -929,7 +1073,10 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
                 position_ids = self.embeddings.position_ids[:, :input_shape[1]]
                 position_ids = position_ids.expand_as(input_ids)
                 final_position_ids = position_ids
-
+        # Turn 1.0 in attention_mask to 0, and 0.0 in attention_mask to -10000(big negative number),
+        # so that when we add the value to softmax, it is equivalent to ignoring masked values,
+        # as the value becomes so small.
+        # attention_mask(batch_size, seq_len+n_patches+1) -> extended_attention_mask(batch_size, 1, 1, seq_len+n_patches+1)
         extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, None, device)
 
         encoder_outputs = self.encoder(

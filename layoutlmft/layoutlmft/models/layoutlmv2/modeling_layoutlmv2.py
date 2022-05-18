@@ -360,11 +360,13 @@ def relative_position_bucket(relative_position, bidirectional=True, num_buckets=
 
     # The other half of the buckets are for logarithmically bigger bins in positions up to max_distance
     # log(n/8) / log(128/8) * (32 - 8)
-    # val_if_large(batch, 561=512+49, 561), for abs neighbors that are more than 8 steps away, the relative position grow slowly. Namely, we don't differentiate much.
+    # val_if_large(batch, 561=512+49, 561), for abs neighbors that are more than 8 steps away,
+    # the relative position grow slowly. Namely, we don't differentiate much.
     val_if_large = max_exact + (
         torch.log(n.float() / max_exact) / math.log(max_distance / max_exact) * (num_buckets - max_exact)
     ).to(torch.long)
-    val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))  # we make sure the maximum relative position <= 15=num_buckets - 1.
+    # we make sure the maximum relative position <= 15=num_buckets - 1.
+    val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
     # ret(batch, 561=512+49, 561) with near neighbors(within 8 steps) described exactly and far away neighbors(more than 8 steps) described logarithmically.
     # left neighbors are in the range of (1 ~ 15), self is 0, and right neighbors are in the range of (17~31).
     ret += torch.where(is_small, n, val_if_large)
