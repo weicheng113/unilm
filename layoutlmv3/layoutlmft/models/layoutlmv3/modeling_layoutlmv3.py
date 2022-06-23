@@ -599,10 +599,10 @@ class LayoutLMv3Encoder(nn.Module):
         ret += torch.where(is_small, n, val_if_large)
         return ret
 
-    def _cal_1d_pos_emb(self, hidden_states, position_ids):
+    def _cal_1d_pos_emb(self, hidden_states, position_ids, valid_span):
         # hidden_states(batch_size, seq_len+n_patches+1, emd_size) contains both textual embedding and visual embedding.
         # position_ids(batch_size, seq_len+n_patches+1)[[0,1,2...511,0,1, 196], ...]
-
+        VISUAL_NUM = 196 + 1
         # rel_pos_mat(batch_size, seq_len+n_patches+1, seq_len+n_patches+1) =
         #       position_ids.unsqueeze(-2)(batch_size, 1, seq_len+n_patches+1)
         #       - position_ids.unsqueeze(-1)(batch_size, seq_len+n_patches+1, 1)
@@ -617,7 +617,17 @@ class LayoutLMv3Encoder(nn.Module):
         # rel_pos_mat[0, 2, :] = [-2, -1, ..., 508, 509, -2, -1, ..., 193, 194]
         # rel_pos_mat store relative positions with neighbors for all the (seq_len+n_patches+1) tokens.
         rel_pos_mat = position_ids.unsqueeze(-2) - position_ids.unsqueeze(-1)
-        # rel_pos(batch_size, seq_len+n_patches+1, seq_len+n_patches+1) with near neighbors(within 8 steps) described
+        if valid_span is not None:
+            # for the text part, if two words are not in the same line,
+            # set their distance to the max value (position_ids.shape[-1])
+            rel_pos_mat[(rel_pos_mat > 0) & (valid_span == False)] = position_ids.shape[1]
+            rel_pos_mat[(rel_pos_mat < 0) & (valid_span == False)] = -position_ids.shape[1]
+
+            # image-text, minimum distance
+            rel_pos_mat[:, -VISUAL_NUM:, :-VISUAL_NUM] = 0
+            rel_pos_mat[:, :-VISUAL_NUM, -VISUAL_NUM:] = 0
+
+# rel_pos(batch_size, seq_len+n_patches+1, seq_len+n_patches+1) with near neighbors(within 8 steps) described
         # exactly and far away neighbors(more than 8 steps) described logarithmically.
         # left neighbors are in the range of (1 ~ 15), self is 0, and right neighbors are in the range of (17~31).
         # rel_pos basically to describe near-by neighbour exactly and far-away neighbour briefly.
@@ -696,7 +706,8 @@ class LayoutLMv3Encoder(nn.Module):
         return_dict=True,
         position_ids=None,
         Hp=None,
-        Wp=None
+        Wp=None,
+        valid_span=None,
     ):
         # hidden_states(batch_size, seq_len+n_patches+1, emd_size) contains both textual embedding and visual embedding.
         # bbox(batch_size, seq_len+n_batches+1, 4) contains bounding boxes, cls_visual_box and patch boxes.
@@ -711,7 +722,7 @@ class LayoutLMv3Encoder(nn.Module):
         next_decoder_cache = () if use_cache else None
         # rel_pos(batch_size, num_attention_heads=12, seq_len+n_patches+1, seq_len+n_patches+1) is relative position
         # information or neighbour information, is calculated for input positions and patch bboxes positions.
-        rel_pos = self._cal_1d_pos_emb(hidden_states, position_ids) if self.has_relative_attention_bias else None
+        rel_pos = self._cal_1d_pos_emb(hidden_states, position_ids, valid_span) if self.has_relative_attention_bias else None
         # rel_2d_pos(batch, num_attention_heads=12, seq_len+n_patches+1, seq_len+n_patches+1) is relative 2d position
         # information or neighbour information, is calculated for input bboxes and patch bboxes.
         rel_2d_pos = self._cal_2d_pos_emb(hidden_states, bbox) if self.has_spatial_attention_bias else None
@@ -930,6 +941,7 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
         bbox=None,
         attention_mask=None,
         token_type_ids=None,
+        valid_span=None,
         position_ids=None,
         head_mask=None,
         inputs_embeds=None,
@@ -1094,6 +1106,7 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
             return_dict=return_dict,
             Hp=Hp,
             Wp=Wp,
+            valid_span=valid_span,
         )
 
         if self.detection:
@@ -1168,6 +1181,7 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
         attention_mask=None,
         token_type_ids=None,
         position_ids=None,
+        valid_span=None,
         head_mask=None,
         inputs_embeds=None,
         labels=None,
@@ -1195,6 +1209,7 @@ class LayoutLMv3ForTokenClassification(LayoutLMv3PreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             images=images,
+            valid_span=valid_span,
         )
 
         sequence_output = outputs[0]
@@ -1248,6 +1263,7 @@ class LayoutLMv3ForQuestionAnswering(LayoutLMv3PreTrainedModel):
         attention_mask=None,
         token_type_ids=None,
         position_ids=None,
+        valid_span=None,
         head_mask=None,
         inputs_embeds=None,
         start_positions=None,
@@ -1282,6 +1298,7 @@ class LayoutLMv3ForQuestionAnswering(LayoutLMv3PreTrainedModel):
             return_dict=return_dict,
             bbox=bbox,
             images=images,
+            valid_span=valid_span,
         )
 
         sequence_output = outputs[0]
@@ -1339,6 +1356,7 @@ class LayoutLMv3ForSequenceClassification(LayoutLMv3PreTrainedModel):
         attention_mask=None,
         token_type_ids=None,
         position_ids=None,
+        valid_span=None,
         head_mask=None,
         inputs_embeds=None,
         labels=None,
@@ -1368,6 +1386,7 @@ class LayoutLMv3ForSequenceClassification(LayoutLMv3PreTrainedModel):
             return_dict=return_dict,
             bbox=bbox,
             images=images,
+            valid_span=valid_span,
         )
 
         sequence_output = outputs[0][:, 0, :]
