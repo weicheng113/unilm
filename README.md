@@ -3,18 +3,20 @@
 We are hiring at all levels (including FTE researchers and interns)! If you are interested in working with us on NLP and large-scale pre-trained models, please send your resume to <a href="mailto:fuwei@microsoft.com" class="x-hidden-focus">fuwei@microsoft.com</a>.
 
 ## AI Fundamentals
-### General-purpose AI
-> [**MetaLM**](https://github.com/microsoft/unilm/tree/master/metalm): **Language Models are General-Purpose Interfaces**
-
-### Extremely Deep/Large Models
-Transformers at Scale = DeepNet + X-MoE
+### Foundation of Extremely Deep/Large Models
+**Transformers at Scale** = DeepNet + X-MoE
 > [**DeepNet**](https://github.com/microsoft/unilm/tree/master/deepnet): scaling Transformers to 1,000 Layers and beyond
 
 > [**X-MoE**](https://github.com/microsoft/unilm/tree/master/xmoe): scalable & finetunable sparse Mixture-of-Experts (MoE)
 
-## Pre-trained Models
+## Foundation (aka Pre-trained) Models
 
-**Large-scale self-supervised pre-training across ```tasks``` (predictive and generative), ```languages``` (100+ languages), and ```modalities``` (language, image, audio, layout/format + language, vision + language, audio + language, etc.)**
+### General-purpose Foundation Model
+> [**MetaLM**](https://github.com/microsoft/unilm/tree/master/metalm): **Language Models are General-Purpose Interfaces**
+
+
+
+**The Big Convergence** - Large-scale self-supervised pre-training across ```tasks``` (predictive and generative), ```languages``` (100+ languages), and ```modalities``` (language, image, audio, layout/format + language, vision + language, audio + language, etc.)
 
 <!--## Large-scale Self-supervised Pre-training Across Tasks, Languages, and Modalities-->
 
@@ -70,6 +72,7 @@ Transformers at Scale = DeepNet + X-MoE
 
 
 ## News
+- June, 2022: [**DiT**](https://arxiv.org/abs/2203.02378) and [**LayoutLMv3**](https://arxiv.org/abs/2204.08387) were accepted by ACM Multimedia 2022.
 - June, 2022: [**MetaLM**](https://github.com/microsoft/unilm/tree/master/metalm) - Language models are general-purpose interfaces to foudation models (language/multilingual, vision, speech, and multimodal).
 - June, 2022: [**VL-BEiT**](https://github.com/microsoft/unilm/tree/master/vl-beit) - bidirectional multimodal Transformer learned from scratch with one unified pretraining task, one shared backbone, and one-stage training, supporting both vision and vision-language tasks.
 - [Model Release] June, 2022: [**LayoutLMv3 Chinese**](https://github.com/microsoft/unilm/tree/master/layoutlmv3) - Chinese version of LayoutLMv3
@@ -115,7 +118,7 @@ Transformers at Scale = DeepNet + X-MoE
 
 **\*\*\*\*\* ```New April, 2022```: [LayoutLMv3](https://github.com/microsoft/unilm/tree/master/layoutlmv3) release \*\*\*\*\***
 
-- [x] [**LayoutLM 3.0**](https://github.com/microsoft/unilm/tree/master/layoutlmv3) (April 19, 2022): LayoutLMv3, a multimodal pre-trained Transformer for Document AI with unified text and image masking. Additionally, it is also pre-trained with a word-patch alignment objective to learn cross-modal alignment by predicting whether the corresponding image patch of a text word is masked. The simple unified architecture and training objectives make LayoutLMv3 a general-purpose pre-trained model for both text-centric and image-centric Document AI tasks. Experimental results show that LayoutLMv3 achieves state-of-the-art performance not only in text-centric tasks, including form understanding, receipt understanding, and document visual question answering, but also in image-centric tasks such as document image classification and document layout analysis. "[LayoutLMv3: Pre-training for Document AI with Unified Text and Image Masking](https://arxiv.org/abs/2204.08387)"
+- [x] [**LayoutLM 3.0**](https://github.com/microsoft/unilm/tree/master/layoutlmv3) (April 19, 2022): LayoutLMv3, a multimodal pre-trained Transformer for Document AI with unified text and image masking. Additionally, it is also pre-trained with a word-patch alignment objective to learn cross-modal alignment by predicting whether the corresponding image patch of a text word is masked. The simple unified architecture and training objectives make LayoutLMv3 a general-purpose pre-trained model for both text-centric and image-centric Document AI tasks. Experimental results show that LayoutLMv3 achieves state-of-the-art performance not only in text-centric tasks, including form understanding, receipt understanding, and document visual question answering, but also in image-centric tasks such as document image classification and document layout analysis. "[LayoutLMv3: Pre-training for Document AI with Unified Text and Image Masking](https://arxiv.org/abs/2204.08387) ```ACM MM 2022```"
 
 **\*\*\*\*\* ```March, 2022```: [EdgeFormer](https://github.com/microsoft/unilm/tree/master/edgelm) release \*\*\*\*\***
 
@@ -124,7 +127,7 @@ Transformers at Scale = DeepNet + X-MoE
 
 **\*\*\*\*\* ```March, 2022```: [DiT](https://github.com/microsoft/unilm/tree/master/dit) release \*\*\*\*\***
 
-- [x] [**DiT**](https://github.com/microsoft/unilm/tree/master/dit) (March 4, 2022): DiT, a self-supervised pre-trained Document Image Transformer model using large-scale unlabeled text images for Document AI tasks, which is essential since no supervised counterparts ever exist due to the lack of human labeled document images. We leverage DiT as the backbone network in a variety of vision-based Document AI tasks, including document image classification, document layout analysis, table detection as well as text detection for OCR. Experiment results have illustrated that the self-supervised pre-trained DiT model achieves new state-of-the-art results on these downstream tasks, e.g. document image classification (91.11 → 92.69), document layout analysis (91.0 → 94.9), table detection (94.23 → 96.55) and text detection for OCR (93.07 → 94.29). "[DiT: Self-supervised Pre-training for Document Image Transformer](https://arxiv.org/abs/2203.02378)"
+- [x] [**DiT**](https://github.com/microsoft/unilm/tree/master/dit) (March 4, 2022): DiT, a self-supervised pre-trained Document Image Transformer model using large-scale unlabeled text images for Document AI tasks, which is essential since no supervised counterparts ever exist due to the lack of human labeled document images. We leverage DiT as the backbone network in a variety of vision-based Document AI tasks, including document image classification, document layout analysis, table detection as well as text detection for OCR. Experiment results have illustrated that the self-supervised pre-trained DiT model achieves new state-of-the-art results on these downstream tasks, e.g. document image classification (91.11 → 92.69), document layout analysis (91.0 → 94.9), table detection (94.23 → 96.55) and text detection for OCR (93.07 → 94.29). "[DiT: Self-supervised Pre-training for Document Image Transformer](https://arxiv.org/abs/2203.02378) ```ACM MM 2022```"
 
 
 **\*\*\*\*\* ```October, 2021```: [WavLM](https://github.com/microsoft/unilm/tree/master/wavlm) release \*\*\*\*\***
